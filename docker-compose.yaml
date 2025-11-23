@@ -1,16 +1,33 @@
 version: "3.9"
 
 services:
-  fastapi:
+  api_service:
     build:
-      context: .
+      context: ./api_service
       dockerfile: Dockerfile
-    image: planservicioia.azurecr.io/fastapi-gemini:${TAG}
-    container_name: fastapi_app
+    image: planservicioia.azurecr.io/api_service:${TAG}
+    container_name: api_service
     volumes:
       - ./data:/app/data
-    ports:
-      - "8000:8000"
     env_file:
-      - .env
-    command: uvicorn app:app --host 0.0.0.0 --port 8000
+      - ./api_service/.env
+    networks:
+      - backend
+  relay_service:
+    build:
+      context: ./relay_service
+      dockerfile: Dockerfile
+    image: planservicioia.azurecr.io/relay_service:${TAG}
+    container_name: relay_service
+    ports:
+      - "8080:8000"
+    env_file:
+      - ./relay_service/.env
+    depends_on:
+      - api_service
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge

@@ -7,9 +7,6 @@ WORKDIR /app
 # Copy requirements.txt first to leverage Docker cache
 COPY requirements.txt .
 
-COPY .env ./
-
-
 # Install all dependencies from requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
