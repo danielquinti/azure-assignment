@@ -1,14 +1,12 @@
-version: "3.9"
-
 services:
-  fastapi:
+  api_service:
     build:
-      context: .
+      context: api_service
       dockerfile: Dockerfile
-    image: planservicioia.azurecr.io/fastapi-gemini:${TAG}
-    container_name: fastapi_app
+    image: planserviciodaniq.azurecr.io/api_service:v1
+    container_name: api_service
+    environment:
+      - GEMINI_API_KEY=AIzaSyDej1B3F3w877xxNtz_QDXwycIW05yoksA
+    command: uvicorn app:app --host 0.0.0.0 --port 8080
     ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    command: uvicorn app:app --host 0.0.0.0 --port 8000
+      - "8080:8080"
