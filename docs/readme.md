@@ -271,3 +271,170 @@ Para la elaboración de este despliegue y la configuración de los comandos, se 
 * [Documentación Oficial de FastAPI (Framework Web)](https://fastapi.tiangolo.com/)
 * [SDK de Google GenAI para Python (Gemini 2.5)](https://github.com/googleapis/python-genai)
 
+---
+
+## 7. Despliegue Multi-Contenedor (Docker Compose)
+
+Opcionalmente, la aplicación se puede estructurar en una arquitectura de múltiples contenedores coordinados por Docker Compose. Esta arquitectura divide el monolito en:
+1. **Frontend API (Gateway):** Un contenedor FastAPI en el puerto 80 que recibe todas las peticiones externas y las redirige hacia la capa interna.
+2. **Backend API:** El contenedor FastAPI original en el puerto 8080 que se comunica exclusivamente con la API de Gemini, protegido del exterior.
+
+### 7.1. Estructura de Docker Compose
+
+En la raíz del proyecto se ha introducido un archivo `docker-compose.yml` que orquesta ambos servicios. Este archivo ya cuenta con el nombre y URL de su ACR resuelto directamente en las imágenes, por lo que no requiere sustitución dinámica de variables:
+
+```yaml
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    image: planservicioia.azurecr.io/fastapi-backend:v1
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    expose:
+      - "8080"
+
+  frontend:
+    build: ./frontend
+    image: planservicioia.azurecr.io/fastapi-frontend:v1
+    environment:
+      - BACKEND_URL=http://backend:8080
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+```
+
+### 7.2. Pruebas Locales (Docker Compose)
+
+En lugar de construir una sola imagen, utilice compose para levantar el cluster entero simultáneamente:
+
+```powershell
+$env:GEMINI_API_KEY="TU_API_KEY_DE_GEMINI"
+docker-compose up --build -d
+```
+Verifique apuntando al puerto 80 (el cual ahora es gestionado por el Gateway frontend):
+```powershell
+Invoke-WebRequest "http://localhost:80/generate?prompt=Prueba_Compose"
+```
+
+![Prueba local con Docker Compose](localcompose.png)
+
+### 7.3. Despliegue en Azure App Service Multi-Container
+
+Para desplegar la aplicación en Azure usando esta topología, tras haberse autenticado y creado su ACR y Plan de App Service (Pasos 1 al 3 de la guía principal), los comandos a ejecutar cambian ligeramente:
+
+**A. Construcción y subida de ambas imágenes al ACR**
+```powershell
+# Exportamos el nombre del ACR para los tags del Compose
+$env:ACR_NAME=$ACR_NAME
+
+# Construimos y subimos las imágenes
+docker-compose build
+docker-compose push
+```
+
+![docker-compose build](composebuild.png)
+![docker-compose push](composepush.png)
+
+
+**B. Aprovisionamiento de la Web App en modo Multi-Container**
+```powershell
+# Crear el App Service Plan (si no lo tienes creado del ejercicio anterior)
+az appservice plan create --name $APP_SERVICE_PLAN --resource-group $RESOURCE_GROUP --sku B1 --is-linux
+
+# Crear la Web App pasándole el docker-compose.yml directamente
+az webapp create --resource-group $RESOURCE_GROUP --plan $APP_SERVICE_PLAN --name $WEB_APP_NAME --multicontainer-config-type compose --multicontainer-config-file docker-compose.yml
+```
+
+![Creación del Plan de App Service](appservicecompose.png)
+![Creación de la Web App Multi-Contenedor](webappcompose.png)
+
+**C. Configuración de Variables en Azure**
+```powershell
+# Vincular las credenciales del ACR a la Web App
+az webapp config container set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --docker-registry-server-url "https://$ACR_NAME.azurecr.io" --docker-registry-server-user $ACR_NAME --docker-registry-server-password $ACR_PASSWORD
+
+# Definir la API Key de Gemini
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings GEMINI_API_KEY="TU_API_KEY_DE_GEMINI"
+
+# Configurar el puerto público: Indicamos a Azure que envíe el tráfico al puerto 80 (Frontend)
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings WEBSITES_PORT=80
+
+# Configurar comunicación interna: En Azure Multi-container los contenedores se comunican por localhost
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings BACKEND_URL="http://localhost:8080"
+
+# Iniciar la Web App (asegura el arranque si la aplicación está detenida)
+az webapp start --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
+```
+
+![Configuración del Contenedor Multi-Contenedor](configcompose.png)
+![Configuración de Variables de Entorno Multi-Contenedor](config2compose.png)
+
+**D. Prueba del Despliegue en Azure**
+Una vez que App Service haya descargado las imágenes y levantado los contenedores (esto puede tomar 2-3 minutos la primera vez), puedes probar que el flujo multi-contenedor funciona haciendo una llamada a tu dominio `.azurewebsites.net`:
+
+```powershell
+# Realizar petición de prueba a la API Frontend desplegada
+Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Test_Compose_Azure"
+```
+
+![Verificación de la API Multi-Contenedor en Azure](azuretestcompose.png)
+
+*(Nota: Si obtienes un error inicial o un tiempo de espera agotado, espera un par de minutos a que los contenedores terminen de arrancar o ejecuta `az webapp restart --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP` para forzar un reinicio).*
+
+### 7.4. Solución de Problemas y Cambios de Código (Troubleshooting)
+
+Durante la migración a la arquitectura multi-contenedor, nos encontramos con varios errores que requirieron los siguientes ajustes en el código y en Azure:
+
+#### 1. Tolerancia a fallos en el Backend (`backend/app.py`)
+**Problema:** Si la variable `GEMINI_API_KEY` no se pasaba correctamente (o tardaba en inyectarse), la llamada a `genai.Client()` fallaba y el contenedor `backend` crasheaba en el arranque, provocando que el Frontend no pudiera conectarse.
+**Solución:** Se envolvió la inicialización en un bloque `try/except` para que el contenedor siempre arranque y devuelva el error gracefully al usuario.
+```python
+try:
+    client = genai.Client()
+except Exception as e:
+    client = None
+    print(f"Warning: genai.Client initialization failed: {e}")
+```
+
+#### 2. Timeout y Traza de Errores en Frontend (`frontend/app.py`)
+**Problema:** Las peticiones desde el frontend al backend sufrían timeouts silenciosos si Gemini tardaba en responder, devolviendo un error `{"detail": ""}` incomprensible.
+**Solución:** Se añadió un `timeout=60.0` explícito en `httpx.AsyncClient(timeout=60.0)` y se cambió la captura de excepciones para usar `repr(e)` y devolver detalles claros:
+```python
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=repr(e))
+```
+
+#### 3. Soporte de variables en Docker Compose (Azure App Service)
+**Problema:** Azure App Service Multi-container no soporta el formato `${ACR_NAME}` en la propiedad `image:` del archivo de compose (provocaba el error `Application Error`).
+**Solución:** Se añadió un script de PowerShell en el aprovisionamiento para inyectar estáticamente el valor y crear un `docker-compose-azure.yml` limpio.
+```powershell
+(Get-Content docker-compose.yml) -replace '\$\{ACR_NAME:-[^\}]*\}', $ACR_NAME | Set-Content docker-compose-azure.yml
+```
+
+#### 4. Enrutamiento del puerto público en Azure
+**Problema:** En el despliegue de un solo contenedor, Azure enrutaba el tráfico al puerto 8080 (`WEBSITES_PORT=8080`). Al cambiar a multi-contenedor, nuestro nuevo Frontend público escucha por el puerto 80, provocando un fallo en el balanceador.
+**Solución:** Se forzó el reseteo de la variable `WEBSITES_PORT` para redirigir el tráfico externo correctamente al puerto 80.
+```powershell
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings WEBSITES_PORT=80
+```
+
+#### 5. Comunicación de red interna entre contenedores en Azure
+**Problema:** Localmente los contenedores se comunicaban vía `http://backend:8080`, pero en Azure fallaba con `ConnectError`. Esto ocurre porque Azure Web App For Containers (Compose) hace que todos los contenedores compartan el mismo espacio de red (namespaces).
+**Solución:** Se modificó la URL del backend en Azure para que el Frontend llamara a `localhost` en lugar del nombre del servicio.
+```powershell
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings BACKEND_URL="http://localhost:8080"
+```
+
+#### 6. Extracción y análisis de logs en Azure
+**Problema:** Durante los errores `:( Application Error`, la consola local no provee información de por qué fallaron los contenedores en el despliegue.
+**Solución:** Usamos comandos de la CLI de Azure para diagnosticar qué ocurría internamente. Para descargar todos los logs como un archivo ZIP local usamos:
+```powershell
+az webapp log download --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
+```
+Adicionalmente, para ver los logs en tiempo real por la consola (muy útil durante arranques lentos o reinicios):
+```powershell
+az webapp log tail --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
+```
