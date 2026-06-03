@@ -18,3 +18,16 @@ async def generate_content(prompt: str = Query(..., description="The prompt to s
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=repr(e))
+
+@app.get("/history")
+async def get_history():
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(f"{BACKEND_URL}/history")
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=repr(e))
+

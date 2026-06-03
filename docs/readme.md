@@ -90,7 +90,7 @@ async def generate_content(prompt: str = Query(..., description="The prompt to s
 Antes de proceder con el despliegue en la nube, se recomienda validar el correcto funcionamiento de la aplicación de manera local mediante Docker.
 
 ### Ejecución mediante Docker local
-Construya la imagen localmente y levante el contenedor pasando la variable de entorno:
+Construya la imagen localmente y levante el contenedor pasando la variable de entorno (para pruebas directas en local sin contenedor, se ha dispuesto un archivo `.env` en la raíz del proyecto que almacena la clave `GEMINI_API_KEY` de forma segura):
 
 ```powershell
 # Construir la imagen local
@@ -384,6 +384,9 @@ Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Test_
 
 *(Nota: Si obtienes un error inicial o un tiempo de espera agotado, espera un par de minutos a que los contenedores terminen de arrancar o ejecuta `az webapp restart --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP` para forzar un reinicio).*
 
+*(Nota para actualizaciones: Si realizas modificaciones en el archivo `docker-compose.yml` localmente y deseas subirlas a Azure, debes volver a cargar la configuración en la Web App ejecutando: `az webapp config container set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --multicontainer-config-type compose --multicontainer-config-file docker-compose.yml`).*
+
+
 ### 7.4. Solución de Problemas y Cambios de Código (Troubleshooting)
 
 Durante la migración a la arquitectura multi-contenedor, nos encontramos con varios errores que requirieron los siguientes ajustes en el código y en Azure:
@@ -438,3 +441,143 @@ Adicionalmente, para ver los logs en tiempo real por la consola (muy útil duran
 ```powershell
 az webapp log tail --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
 ```
+
+## 8. Persistencia con Azure Files
+
+Para asegurar que las consultas realizadas a la aplicación no se pierdan cuando se reinician los contenedores o se vuelve a desplegar el servicio en la nube, se ha implementado un mecanismo de almacenamiento persistente montando un recurso compartido de archivos de Azure (Azure File Share) directamente en los contenedores.
+
+El servicio Backend guarda cada prompt en formato de texto plano dentro de la ruta `/app/data/history.txt`. Esta ruta está mapeada a un almacenamiento externo y permanente.
+
+### 8.1. Aprovisionamiento de Azure Files y Conexión con la Web App
+
+Sigue estos pasos en la terminal PowerShell para crear el almacenamiento persistente y conectarlo a tu Web App:
+
+##### Paso 1: Definir variables de entorno adicionales
+```powershell
+# Variables para el almacenamiento persistente
+$STORAGE_ACCOUNT = "almacenamientoappia" # Debe ser un nombre único globalmente
+$SHARE_NAME = "archivos-texto"
+$MOUNT_PATH = "/app/data" # Ruta dentro del contenedor donde se guardará el historial
+```
+
+##### Paso 2: Crear la Infraestructura de Almacenamiento
+```powershell
+# 1. Crear la Cuenta de Almacenamiento (Storage Account)
+az storage account create --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP --location $LOCATION --sku Standard_LRS
+
+# 2. Crear el recurso compartido de archivos (File Share)
+az storage share-rm create --resource-group $RESOURCE_GROUP --storage-account $STORAGE_ACCOUNT --name $SHARE_NAME --quota 5
+```
+
+![Infraestructura de Almacenamiento](persistance1.png)
+
+##### Paso 3: Conectar el Almacenamiento a la Web App
+```powershell
+# 1. Obtener la clave de acceso del Storage Account
+$STORAGE_KEY = (az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" --output tsv)
+
+# 2. (Opcional) Eliminar un montaje previo con el mismo ID si existe
+az webapp config storage-account delete --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --custom-id AlmacenamientoPersistente
+
+# 3. Montar el almacenamiento persistente en la Web App
+az webapp config storage-account add --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --custom-id AlmacenamientoPersistente --storage-type AzureFiles --account-name $STORAGE_ACCOUNT --share-name $SHARE_NAME --access-key $STORAGE_KEY --mount-path $MOUNT_PATH
+```
+
+![Conexión de Almacenamiento](persistance2.png)
+
+---
+
+### 8.2. Ajuste al Docker Compose (`docker-compose.yml`)
+
+Para soportar las pruebas y persistencia en local, se ha modificado la definición del servicio `backend` en el archivo `docker-compose.yml` agregando la sección `volumes`:
+
+```yaml
+  backend:
+    build: ./backend
+    image: planservicioia.azurecr.io/fastapi-backend:v2
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    expose:
+      - "8080"
+    volumes:
+      - AlmacenamientoPersistente:/app/data
+
+# Definición del volumen al final del archivo
+volumes:
+  AlmacenamientoPersistente:
+```
+* **En Local:** docker-compose crea y gestiona automáticamente un volumen local llamado `AlmacenamientoPersistente` que se monta en `/app/data` y persiste los datos de tus consultas.
+* **En Azure:** Azure App Service intercepta el nombre del volumen (`AlmacenamientoPersistente`) y lo asocia automáticamente con el montaje de Azure Files que tiene el mismo `custom-id` (Paso 3), guardando el archivo de texto directamente en la cuenta de almacenamiento en la nube sin depender del almacenamiento efímero del contenedor.
+
+---
+
+### 8.3. Pruebas de Persistencia en Local
+
+1. Levanta los contenedores en local:
+   ```powershell
+   docker-compose up --build -d
+   ```
+2. Envía prompts de prueba al endpoint público de generación (puerto 80):
+   ```powershell
+   Invoke-WebRequest "http://localhost:80/generate?prompt=Local_Prompt_1"
+   Invoke-WebRequest "http://localhost:80/generate?prompt=Local_Prompt_2"
+   ```
+3. Verifica que se ha creado el historial accediendo al endpoint `/history`:
+   ```powershell
+   (Invoke-WebRequest "http://localhost:80/history").Content
+   # Salida esperada: {"history":["Local_Prompt_1"]}
+   ```
+
+![Prueba de Historial en Local](storagelocal.png)
+
+4. Detén y elimina por completo los contenedores:
+   ```powershell
+   docker-compose down
+   ```
+5. Vuelve a levantar el servicio:
+   ```powershell
+   docker-compose up -d
+   ```
+6. Consulta nuevamente el historial.
+   ```powershell
+   (Invoke-WebRequest "http://localhost:80/history").Content
+   # Salida esperada: {"history":["Local_Prompt_1"]}
+   ```
+Los datos deben seguir presentes puesto que están guardados en el archivo `./data/history.txt` de tu equipo local y sobreviven a la recreación de los contenedores.
+
+---
+
+### 8.4. Pruebas de Persistencia en Azure
+
+1. Reconstruye y sube las imágenes al ACR con los nuevos cambios de código:
+   ```powershell
+   $env:ACR_NAME=$ACR_NAME
+   docker-compose build
+   docker-compose push
+   ```
+2. Forza un reinicio de la Web App en Azure para aplicar la configuración de almacenamiento y descargar las nuevas imágenes:
+   ```powershell
+   az webapp restart --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
+   ```
+3. Envía una consulta a la Web App en la nube:
+   ```powershell
+   Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Azure_Prompt_1"
+   ```
+4. Consulta el endpoint de historial para comprobar que ha registrado la consulta:
+   ```powershell
+   (Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/history").Content
+   # Salida esperada: {"history":["Azure_Prompt_1"]}
+   ```
+5. Forza un reinicio de la Web App en Azure para simular un fallo o actualización del servicio:
+   ```powershell
+   az webapp restart --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
+   ```
+6. Vuelve a realizar la consulta al historial:
+   ```powershell
+   (Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/history").Content
+   ```
+   **Resultado:** El endpoint debe seguir devolviendo `{"history":["Azure_Prompt_1"]}` demostrando que el archivo se almacena en el volumen persistente de Azure Files y no se pierde tras reiniciar el servicio.
+
+   ![Prueba de Persistencia en Azure](restart.png)
+
+   *(Nota: Es posible que aparezcan más entradas en la lista del historial si ya habías lanzado peticiones de prueba anteriormente).*
