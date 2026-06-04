@@ -1,0 +1,33 @@
+sequenceDiagram
+    autonumber
+    actor Cliente
+    participant Frontend as Frontend (Contenedor A)
+    participant Volumen as Volumen Persistente<br/>(history.txt)
+    participant Backend as Backend (Contenedor B)
+    participant Gemini as API Google Gemini (Ext)
+
+    Note over Cliente, Gemini: FLUJO 1: Generación y Log de Comunicación
+    Cliente->>Frontend: GET /generate?prompt=...
+    activate Frontend
+    Frontend->>Volumen: Escribe "INFO: Enviando prompt al servicio B..."
+    Note over Frontend, Volumen: Persistencia del log de inicio
+    Frontend->>Backend: GET /generate?prompt=...
+    activate Backend
+    Backend->>Gemini: model.generate_content(...)
+    activate Gemini
+    Gemini-->>Backend: Respuesta con texto generado
+    deactivate Gemini
+    Backend-->>Frontend: JSON {"prompt": "...", "text": "..."}
+    deactivate Backend
+    Frontend->>Volumen: Escribe "INFO: Respuesta exitosa recibida del servicio B."
+    Note over Frontend, Volumen: Persistencia del log de éxito
+    Frontend-->>Cliente: JSON {"prompt": "...", "text": "..."}
+    deactivate Frontend
+
+    Note over Cliente, Gemini: FLUJO 2: Recuperación de Logs
+    Cliente->>Frontend: GET /logs
+    activate Frontend
+    Frontend->>Volumen: Lee contenido de history.txt
+    Volumen-->>Frontend: Líneas del archivo de logs
+    Frontend-->>Cliente: JSON {"logs": [...]}
+    deactivate Frontend

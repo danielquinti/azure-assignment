@@ -1,0 +1,15 @@
+sequenceDiagram
+    autonumber
+    actor Cliente
+    participant App as FastAPI App (Contenedor Único)
+    participant Gemini as API Google Gemini (Ext)
+
+    Note over Cliente, Gemini: FLUJO: Generación de Contenido (Sin Persistencia)
+    Cliente->>App: GET /generate?prompt=...
+    activate App
+    App->>Gemini: model.generate_content(...)
+    activate Gemini
+    Gemini-->>App: Respuesta con texto generado
+    deactivate Gemini
+    App-->>Cliente: JSON {"prompt": "...", "text": "..."}
+    deactivate App
