@@ -4,6 +4,19 @@ Este documento detalla la estructura, generación de imagen y flujo de comandos 
 
 ---
 
+## Componentes Azure Necesarios
+
+Para llevar a cabo el despliegue de esta arquitectura en la nube, se requieren los siguientes componentes de **Microsoft Azure**:
+
+* **Grupo de Recursos (Resource Group):** Contenedor lógico que agrupa todos los recursos relacionados con este despliegue para facilitar su administración y eliminación conjunta.
+* **Azure Container Registry (ACR):** Registro privado de Docker en Azure donde se compilan, almacenan y gestionan las imágenes de los contenedores (`backend` y `frontend`).
+* **Plan de App Service (App Service Plan):** Define los recursos físicos de computación y el sistema operativo (Linux con SKU B1) sobre los que correrá la aplicación.
+* **Azure App Service (Web App for Containers):** Servicio PaaS que ejecuta la aplicación web a partir de la configuración multi-contenedor definida en el archivo `docker-compose.yml`.
+* **Cuenta de Almacenamiento (Storage Account):** Servicio que aloja y gestiona las capacidades de almacenamiento en la nube requeridas para el proyecto.
+* **Azure Files (File Share):** Recurso compartido de archivos montado como volumen persistente en la Web App (mapeado a `/app/data`) para salvaguardar el archivo de logs `history.txt` y asegurar su persistencia tras reinicios de los contenedores.
+
+---
+
 ## URLs del Servicio Desplegado en Azure
 
 > **ℹ️ Nota:** Todos los bloques de este documento comparten la misma Web App de Azure (`webapp-fastapi-gemini`), actualizándose iterativamente. La URL base es única y permanece constante a través de las distintas versiones desplegadas.
@@ -725,7 +738,59 @@ volumes:
   AlmacenamientoPersistente:
 ```
 
-### 4.3. Pruebas de Logs y Persistencia en Local
+### 4.3. Definición de los Contenedores (Dockerfiles)
+
+Para la construcción de los contenedores de Frontend y Backend de esta arquitectura final, se utilizan los siguientes archivos `Dockerfile`:
+
+#### Backend (`backend/Dockerfile`)
+```dockerfile
+# Use official Python slim image
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements.txt first to leverage Docker cache
+COPY requirements.txt .
+
+# Install all dependencies from requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the FastAPI app
+COPY app.py .
+
+# Expose FastAPI port
+EXPOSE 8080
+
+# Run the app with Uvicorn
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+#### Frontend (`frontend/Dockerfile`)
+```dockerfile
+# Use official Python slim image
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements.txt first to leverage Docker cache
+COPY requirements.txt .
+
+# Install all dependencies from requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the FastAPI app
+COPY app.py .
+
+# Expose FastAPI port
+EXPOSE 80
+
+# Run the app with Uvicorn on port 80
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
+```
+
+### 4.4. Pruebas de Logs y Persistencia en Local
 
 > **⚠️ Prerequisito:** Comprueba que **Docker Desktop** está en ejecución antes de continuar (icono en la barra de tareas → *"Docker Desktop is running"*).
 
@@ -771,7 +836,7 @@ volumes:
 
    ![Persistencia de logs tras recreación de contenedores](images/28_persistencia_logs_tras_reinicio_local.png)
 
-### 4.4. Instrucciones de Despliegue en Azure (v3)
+### 4.5. Instrucciones de Despliegue en Azure (v3)
 
 Para desplegar esta nueva configuración (imágenes `v3` y persistencia en el Frontend) en Azure, ejecuta los siguientes comandos en tu terminal de PowerShell:
 
@@ -885,7 +950,7 @@ Para comprobar la persistencia de los logs ante reinicios y recreaciones de los 
 
 ---
 
-### 4.5. Control de Gastos y Limpieza de Recursos (Azure Cost Management)
+### 4.6. Control de Gastos y Limpieza de Recursos (Azure Cost Management)
 
 Para evitar que los recursos aprovisionados sigan consumiendo saldo de tus créditos de estudiante o facturando importes adicionales tras haber finalizado la práctica, se aconseja gestionar la parada o eliminación del entorno con uno de los siguientes métodos:
 
@@ -940,3 +1005,12 @@ Para la elaboración de este despliegue y la configuración de los comandos util
 * [Documentación Oficial de FastAPI (Framework Web)](https://fastapi.tiangolo.com/)
 * [SDK de Google GenAI para Python (Gemini 2.5)](https://github.com/googleapis/python-genai)
 * [httpx — Cliente HTTP asíncrono para Python](https://www.python-httpx.org/)
+
+---
+
+## Anexo: Enlaces del Proyecto
+
+A continuación se facilitan los enlaces correspondientes al repositorio de código fuente y a la demostración del despliegue:
+
+* **Repositorio de GitHub:** [danielquinti/azure-assignment](https://github.com/danielquinti/azure-assignment)
+* **Prueba de Despliegue (Vídeo):** [Demostración en vídeo de la práctica (SharePoint)](https://udcgal-my.sharepoint.com/:v:/g/personal/daniel_quintillan_udc_es/IQAZx4uVDzvRSLAc_VQAiSLoAaY_CBG_JocwCdQYRb9-5mE?e=e3HjUF)

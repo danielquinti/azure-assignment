@@ -6,9 +6,15 @@
 
 ## Escena 1 — Introducción (≈1 min)
 
-**Narración:** Presentar brevemente el proyecto: una API GenAI en FastAPI con dos contenedores (Frontend y Backend) desplegados en Azure App Service con persistencia en Azure Files.
+**Narración:** Presentar brevemente el proyecto: una API GenAI en FastAPI con una arquitectura de dos contenedores (Frontend y Backend) enrutados y comunicados internamente. Explicar que realizaremos el despliegue completo desde cero en Microsoft Azure utilizando los siguientes componentes clave:
+* **Grupo de Recursos (Resource Group):** Contenedor lógico para administrar de manera unificada todos los servicios del despliegue.
+* **Azure Container Registry (ACR):** Registro privado de Docker donde compilaremos y almacenaremos las imágenes de nuestros contenedores Frontend y Backend.
+* **Plan de App Service (App Service Plan):** La infraestructura de cómputo Linux (SKU B1) sobre la cual se ejecutarán nuestros contenedores.
+* **Azure App Service (Web App for Containers):** El servicio PaaS multi-contenedor donde desplegaremos nuestro archivo `docker-compose.yml`.
+* **Cuenta de Almacenamiento (Storage Account):** El almacén general en la nube necesario para dar soporte al almacenamiento persistente.
+* **Azure Files (File Share):** El recurso compartido de archivos que montaremos como volumen persistente en el contenedor de Frontend para salvaguardar el archivo `history.txt` con los logs de comunicación.
 
-**Pantalla:** Mostrar el diagrama de arquitectura final (`images/26_diagrama_arquitectura_v3.png`):
+**Pantalla:** Mostrar el diagrama de arquitectura final (`images/26_diagrama_arquitectura_v3.png`) señalando cada uno de estos componentes a medida que se mencionan:
 
 ![Diagrama de Arquitectura Final](images/26_diagrama_arquitectura_v3.png)
 
