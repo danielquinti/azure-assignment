@@ -4,6 +4,59 @@ Este documento detalla la estructura, generación de imagen y flujo de comandos 
 
 ---
 
+## URLs del Servicio Desplegado en Azure
+
+> **ℹ️ Nota:** Todos los bloques de este documento comparten la misma Web App de Azure (`webapp-fastapi-gemini`), actualizándose iterativamente. La URL base es única y permanece constante a través de las distintas versiones desplegadas.
+
+| Endpoint | URL | Descripción |
+|---|---|---|
+| Generación de contenido | [`https://webapp-fastapi-gemini.azurewebsites.net/generate?prompt=...`](https://webapp-fastapi-gemini.azurewebsites.net/generate?prompt=Hello) | Envía un prompt a Gemini y devuelve la respuesta |
+| Historial de logs | [`https://webapp-fastapi-gemini.azurewebsites.net/logs`](https://webapp-fastapi-gemini.azurewebsites.net/logs) | Devuelve el historial de comunicaciones Frontend→Backend (disponible desde Bloque 4) |
+
+---
+
+## Descripción de los Despliegues
+
+La práctica implementa un servicio de Inteligencia Artificial Generativa (GenAI) basado en la API de **Google Gemini**, desplegado de forma iterativa en **Azure App Service (PaaS)** a través de cuatro bloques de complejidad creciente:
+
+| Bloque | Tipo | Descripción resumida |
+|---|---|---|
+| **1** | Contenedor único | Una sola imagen FastAPI que recibe prompts del usuario y los envía directamente a la API de Gemini. Sin persistencia, sin proxy. Se despliega en Azure App Service (Linux) usando Azure Container Registry (ACR). |
+| **2** | Docker Compose — 2 contenedores | Se divide en un **Frontend** (gateway público en puerto 80) y un **Backend** (procesador Gemini en puerto 8080, sin exposición directa al exterior). El Frontend enruta las peticiones al Backend internamente. Despliegue multi-contenedor en Azure App Service. |
+| **3** | Compose + Persistencia (backend) | Sobre el Bloque 2, el Backend guarda cada prompt en un archivo `history.txt` montado sobre **Azure Files** (File Share). El historial sobrevive a reinicios y reempliegues gracias al volumen persistente. |
+| **4** | Compose + Persistencia (frontend) + Logs | El Frontend pasa a ser el responsable de registrar logs de comunicación (URL llamada, respuesta recibida) en `history.txt`. El volumen persistente se traslada al Frontend. Se añade el endpoint `/logs` para consultar el historial. Es la arquitectura final desplegada. |
+
+Todos los bloques utilizan imágenes propias construidas desde cero (no se usa DockerHub) y almacenadas en el **Azure Container Registry** `planservicioia.azurecr.io`.
+
+---
+
+## Prerrequisitos del Entorno
+
+Antes de comenzar a ejecutar los comandos de despliegue o pruebas locales, asegúrate de contar con los siguientes elementos instalados y configurados en tu equipo:
+
+### 1. Docker Desktop
+* **Uso:** Construcción, etiquetado y ejecución de contenedores locales, así como publicación de imágenes en el registro privado.
+* **Instalación:** Descarga e instala [Docker Desktop para Windows](https://www.docker.com/products/docker-desktop/).
+* **Verificación:** Ejecuta el siguiente comando en PowerShell para verificar que el servicio está activo:
+  ```powershell
+  docker info
+  ```
+* **Inicio rápido (si no está activo):** Si Docker no se está ejecutando, puedes iniciarlo desde el menú de inicio de Windows o por PowerShell:
+  ```powershell
+  Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+  ```
+  *Espera a que el icono de Docker en la barra de tareas muestre "Docker Desktop is running" antes de continuar.*
+
+### 2. Azure CLI
+* **Uso:** Administración, creación y configuración de toda la infraestructura PaaS (Azure App Service, Azure Container Registry, Azure Files).
+* **Instalación:** Sigue la [guía de instalación de Azure CLI para Windows](https://learn.microsoft.com/cli/azure/install-azure-cli-windows).
+* **Verificación:** Ejecuta el siguiente comando en PowerShell para confirmar que está instalado correctamente:
+  ```powershell
+  az --version
+  ```
+
+---
+
 ## Bloque 1: Despliegue de un Contenedor
 
 ### 1.1. Descripción del Despliegue (Arquitectura Mínima)
@@ -81,23 +134,30 @@ async def generate_content(prompt: str = Query(..., description="The prompt to s
 
 Antes de proceder con el despliegue en la nube, se recomienda validar el correcto funcionamiento de la aplicación de manera local mediante Docker.
 
+> **⚠️ Prerequisito:** Asegúrate de que **Docker Desktop** está arrancado antes de ejecutar cualquier comando `docker`. Puedes iniciarlo desde el menú de inicio de Windows o ejecutando `Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"` en PowerShell. Espera a que el icono de Docker en la barra de tareas muestre el mensaje *"Docker Desktop is running"* antes de continuar.
+
 #### Ejecución mediante Docker local
 Construye la imagen localmente y levanta el contenedor pasando la variable de entorno (para ejecución directa sin Docker, existe un archivo `.env` en la raíz del proyecto con la clave `GEMINI_API_KEY`):
 
 ```powershell
+# Leer la API Key desde el archivo .env (evita exponer la clave en el historial de comandos)
+$env:GEMINI_API_KEY = (Get-Content .env | Select-String "GEMINI_API_KEY" | ForEach-Object { $_.ToString().Split("=",2)[1] })
+
 # Construir la imagen local
 docker build -t fastapi-gemini:local .
 
 # Ejecutar el contenedor
-docker run -d -p 8080:8080 --name fastapi-app-local -e GEMINI_API_KEY="TU_API_KEY_DE_GEMINI" fastapi-gemini:local
+docker run -d -p 8080:8080 --name fastapi-app-local -e GEMINI_API_KEY=$env:GEMINI_API_KEY fastapi-gemini:local
 ```
 
 #### Verificación local:
 Realiza una llamada de prueba desde el navegador o consola al puerto local `8080`:
 
 ```powershell
-Invoke-WebRequest "http://localhost:8080/generate?prompt=Hello_Local_Testing"
+Invoke-WebRequest "http://localhost:8080/generate?prompt=Hello_Local_Testing" -UseBasicParsing
 ```
+
+> **ℹ️ Nota sobre PowerShell:** Se añade el parámetro `-UseBasicParsing` en todos los comandos `Invoke-WebRequest` de esta práctica para evitar que PowerShell intente inicializar el motor de Internet Explorer (lo cual suele lanzar una advertencia de seguridad interactiva y requerir confirmación del usuario para continuar).
 
 ![Prueba local exitosa](images/02_prueba_local_contenedor_unico.png)
 
@@ -154,8 +214,8 @@ az acr update -n $ACR_NAME --admin-enabled true
 # Obtener la contraseña de administrador
 $ACR_PASSWORD = (az acr credential show --name $ACR_NAME --query "passwords[0].value" -o tsv)
 
-# Iniciar sesión local en Docker con las credenciales de ACR
-docker login "$ACR_NAME.azurecr.io" --username $ACR_NAME --password $ACR_PASSWORD
+# Iniciar sesión local en Docker con las credenciales de ACR (usando password-stdin por seguridad)
+echo $ACR_PASSWORD | docker login "$ACR_NAME.azurecr.io" --username $ACR_NAME --password-stdin
 ```
 
 ![Autenticación Docker local](images/06_login_docker_acr.png)
@@ -201,11 +261,14 @@ az webapp create --resource-group $RESOURCE_GROUP --plan $APP_SERVICE_PLAN --nam
 Configura la autenticación del App Service contra el ACR para que pueda descargar las actualizaciones de la imagen y define los secretos de la aplicación:
 
 ```powershell
-# Vincular las credenciales del registro privado a la Web App
-az webapp config container set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --docker-custom-image-name $IMAGE_TAG --docker-registry-server-url "https://$ACR_NAME.azurecr.io" --docker-registry-server-user $ACR_NAME --docker-registry-server-password $ACR_PASSWORD
+# Leer la API Key desde el archivo .env
+$GEMINI_API_KEY = (Get-Content .env | Select-String "GEMINI_API_KEY" | ForEach-Object { $_.ToString().Split("=",2)[1] })
+
+# Vincular las credenciales del registro privado a la Web App (usando parámetros actualizados)
+az webapp config container set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --docker-custom-image-name $IMAGE_TAG --container-registry-url "https://$ACR_NAME.azurecr.io" --container-registry-user $ACR_NAME --container-registry-password $ACR_PASSWORD
 
 # Definir la API Key de Gemini y forzar el puerto 8080 dentro del contenedor
-az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings WEBSITES_PORT=8080 GEMINI_API_KEY="TU_API_KEY_DE_GEMINI"
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings WEBSITES_PORT=8080 GEMINI_API_KEY=$GEMINI_API_KEY
 ```
 
 ![Configuración de la Web App en Azure](images/11_configuracion_webapp_azure.png)
@@ -218,7 +281,11 @@ Una vez que el despliegue haya completado su inicio en Azure, puedes probar el e
 
 ```powershell
 # Realizar petición de prueba a la API desplegada en Azure
-Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Explain_PaaS_in_one_sentence"
+# Opción A: usando la variable (requiere haberla definido antes en la sesión)
+Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Explain_PaaS_in_one_sentence" -UseBasicParsing
+
+# Opción B: con la URL literal (funciona en cualquier sesión)
+Invoke-WebRequest "https://webapp-fastapi-gemini.azurewebsites.net/generate?prompt=Explain_PaaS_in_one_sentence" -UseBasicParsing
 ```
 
 #### Formato esperado de respuesta:
@@ -281,8 +348,11 @@ services:
 
 En lugar de construir una sola imagen, utiliza compose para levantar el clúster entero simultáneamente:
 
+> **⚠️ Prerequisito:** Comprueba que **Docker Desktop** está en ejecución antes de continuar (icono en la barra de tareas → *"Docker Desktop is running"*).
+
 ```powershell
-$env:GEMINI_API_KEY="TU_API_KEY_DE_GEMINI"
+# Leer la API Key desde el archivo .env
+$env:GEMINI_API_KEY = (Get-Content .env | Select-String "GEMINI_API_KEY" | ForEach-Object { $_.ToString().Split("=",2)[1] })
 docker-compose up --build -d
 ```
 Verifique apuntando al puerto 80 (el cual ahora es gestionado por el Gateway frontend):
@@ -336,11 +406,14 @@ az webapp create --resource-group $RESOURCE_GROUP --plan $APP_SERVICE_PLAN --nam
 
 **C. Configuración de Variables en Azure**
 ```powershell
-# Vincular las credenciales del ACR a la Web App
-az webapp config container set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --docker-registry-server-url "https://$ACR_NAME.azurecr.io" --docker-registry-server-user $ACR_NAME --docker-registry-server-password $ACR_PASSWORD
+# Vincular las credenciales del ACR a la Web App (usando parámetros actualizados)
+az webapp config container set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP --container-registry-url "https://$ACR_NAME.azurecr.io" --container-registry-user $ACR_NAME --container-registry-password $ACR_PASSWORD
+
+# Leer la API Key desde el archivo .env
+$GEMINI_API_KEY = (Get-Content .env | Select-String "GEMINI_API_KEY" | ForEach-Object { $_.ToString().Split("=",2)[1] })
 
 # Definir la API Key de Gemini
-az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings GEMINI_API_KEY="TU_API_KEY_DE_GEMINI"
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings GEMINI_API_KEY=$GEMINI_API_KEY
 
 # Configurar el puerto público: Indicamos a Azure que envíe el tráfico al puerto 80 (Frontend)
 az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --settings WEBSITES_PORT=80
@@ -360,7 +433,7 @@ Una vez que App Service haya descargado las imágenes y levantado los contenedor
 
 ```powershell
 # Realizar petición de prueba a la API Frontend desplegada
-Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Test_Compose_Azure"
+Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Test_Compose_Azure" -UseBasicParsing
 ```
 
 ![Verificación de la API Multi-Contenedor en Azure](images/20_verificacion_api_azure_compose.png)
@@ -466,7 +539,10 @@ $STORAGE_KEY = (az storage account keys list --resource-group $RESOURCE_GROUP --
 # 2. (Opcional) Eliminar un montaje previo con el mismo ID si existe
 az webapp config storage-account delete --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --custom-id AlmacenamientoPersistente
 
-# 3. Montar el almacenamiento persistente en la Web App
+# 3. (Opcional) Limpiar el historial previo en la nube para empezar con una demo limpia (si no existe el archivo, dará error, el cual se puede ignorar)
+az storage file delete --share-name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY --path history.txt
+
+# 4. Montar el almacenamiento persistente en la Web App
 az webapp config storage-account add --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --custom-id AlmacenamientoPersistente --storage-type AzureFiles --account-name $STORAGE_ACCOUNT --share-name $SHARE_NAME --access-key $STORAGE_KEY --mount-path $MOUNT_PATH
 
 # 4. Reiniciar la Web App para que el montaje surta efecto
@@ -515,18 +591,20 @@ volumes:
 
 ### 3.3. Pruebas de Persistencia en Local
 
+> **⚠️ Prerequisito:** Comprueba que **Docker Desktop** está en ejecución antes de continuar (icono en la barra de tareas → *"Docker Desktop is running"*).
+
 1. Levanta los contenedores en local:
    ```powershell
    docker-compose up --build -d
    ```
 2. Envía prompts de prueba al endpoint público de generación (puerto 80):
    ```powershell
-   Invoke-WebRequest "http://localhost:80/generate?prompt=Local_Prompt_1"
-   Invoke-WebRequest "http://localhost:80/generate?prompt=Local_Prompt_2"
+   Invoke-WebRequest "http://localhost:80/generate?prompt=Local_Prompt_1" -UseBasicParsing
+   Invoke-WebRequest "http://localhost:80/generate?prompt=Local_Prompt_2" -UseBasicParsing
    ```
 3. Verifica que se ha creado el historial accediendo al endpoint `/history`:
    ```powershell
-   (Invoke-WebRequest "http://localhost:80/history").Content
+   (Invoke-WebRequest "http://localhost:80/history" -UseBasicParsing).Content
    # Salida esperada: {"history":["Local_Prompt_1"]}
    ```
 
@@ -542,7 +620,7 @@ volumes:
    ```
 6. Consulta nuevamente el historial.
    ```powershell
-   (Invoke-WebRequest "http://localhost:80/history").Content
+   (Invoke-WebRequest "http://localhost:80/history" -UseBasicParsing).Content
    # Salida esperada: {"history":["Local_Prompt_1"]}
    ```
 Los datos deben seguir presentes puesto que están guardados en el archivo `./data/history.txt` de tu equipo local y sobreviven a la recreación de los contenedores.
@@ -567,20 +645,32 @@ Los datos deben seguir presentes puesto que están guardados en el archivo `./da
    ```
 3. Envía una consulta a la Web App en la nube:
    ```powershell
-   Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Azure_Prompt_1"
+   Invoke-WebRequest "https://webapp-fastapi-gemini.azurewebsites.net/generate?prompt=Azure_Prompt_1" -UseBasicParsing
    ```
 4. Consulta el endpoint de historial para comprobar que ha registrado la consulta:
    ```powershell
-   (Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/history").Content
+   (Invoke-WebRequest "https://webapp-fastapi-gemini.azurewebsites.net/history" -UseBasicParsing).Content
    # Salida esperada: {"history":["Azure_Prompt_1"]}
    ```
-5. Forza un reinicio de la Web App en Azure para simular un fallo o actualización del servicio:
+
+5. (Opcional) Verifica la persistencia listando los archivos en Azure File Share directamente mediante Azure CLI:
+   ```powershell
+   # Listar archivos en el File Share
+   az storage file list --share-name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY --output table
+
+   # Descargar y mostrar el contenido de history.txt
+   az storage file download --share-name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY --path history.txt --dest .
+   Get-Content history.txt
+   Remove-Item history.txt
+   ```
+
+6. Forza un reinicio de la Web App en Azure para simular un fallo o actualización del servicio:
    ```powershell
    az webapp restart --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
    ```
-6. Vuelve a realizar la consulta al historial:
+7. Vuelve a realizar la consulta al historial:
    ```powershell
-   (Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/history").Content
+   (Invoke-WebRequest "https://webapp-fastapi-gemini.azurewebsites.net/history" -UseBasicParsing).Content
    ```
    **Resultado:** El endpoint debe seguir devolviendo `{"history":["Azure_Prompt_1"]}` demostrando que el archivo se almacena en el volumen persistente de Azure Files y no se pierde tras reiniciar el servicio.
 
@@ -637,9 +727,12 @@ volumes:
 
 ### 4.3. Pruebas de Logs y Persistencia en Local
 
+> **⚠️ Prerequisito:** Comprueba que **Docker Desktop** está en ejecución antes de continuar (icono en la barra de tareas → *"Docker Desktop is running"*).
+
 1. Reconstruye y levanta los contenedores con las imágenes `v3`:
    ```powershell
-   $env:GEMINI_API_KEY="TU_API_KEY_DE_GEMINI"
+   # Leer la API Key desde el archivo .env
+   $env:GEMINI_API_KEY = (Get-Content .env | Select-String "GEMINI_API_KEY" | ForEach-Object { $_.ToString().Split("=",2)[1] })
    docker-compose up --build -d
    ```
 2. Envía una consulta de prueba al frontend (puerto 80):
@@ -672,7 +765,7 @@ volumes:
    ```
 6. Consulta nuevamente el endpoint de logs:
    ```powershell
-   (Invoke-WebRequest "http://localhost:80/logs").Content
+   (Invoke-WebRequest "http://localhost:80/logs" -UseBasicParsing).Content
    ```
    **Resultado:** El endpoint debe seguir devolviendo los registros de logs previos (`"INFO - Enviando prompt..."` y `"INFO - Respuesta exitosa..."`), demostrando que el archivo se almacena en el volumen persistente `AlmacenamientoPersistente` en tu equipo local y sobrevive a la recreación de los contenedores.
 
@@ -687,8 +780,8 @@ Para desplegar esta nueva configuración (imágenes `v3` y persistencia en el Fr
 # Exportamos el nombre del ACR para etiquetar las imágenes v3
 $env:ACR_NAME=$ACR_NAME
 
-# Autenticarse en el ACR antes de hacer push
-docker login "$ACR_NAME.azurecr.io" --username $ACR_NAME --password $ACR_PASSWORD
+# Autenticarse en el ACR antes de hacer push (usando password-stdin por seguridad)
+echo $ACR_PASSWORD | docker login "$ACR_NAME.azurecr.io" --username $ACR_NAME --password-stdin
 
 # Construimos y subimos las imágenes
 docker-compose build
@@ -710,7 +803,22 @@ $STORAGE_KEY     = (az storage account keys list --resource-group $RESOURCE_GROU
 
 # Forzar a Azure a leer la nueva configuración del docker-compose.yml con las imágenes v3
 az webapp config container set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --multicontainer-config-type compose --multicontainer-config-file docker-compose.yml
+
+# Reconectar las credenciales del ACR a la Web App (necesario tras actualizar el compose, usando parámetros actualizados)
+az webapp config container set --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP `
+  --container-registry-url "https://$ACR_NAME.azurecr.io" `
+  --container-registry-user $ACR_NAME `
+  --container-registry-password $ACR_PASSWORD
+
+# Leer la API Key desde el archivo .env
+$GEMINI_API_KEY = (Get-Content .env | Select-String "GEMINI_API_KEY" | ForEach-Object { $_.ToString().Split("=",2)[1] })
+
+# Configurar variables de entorno: API Key, puerto público y URL interna del backend
+az webapp config appsettings set --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME `
+  --settings GEMINI_API_KEY=$GEMINI_API_KEY WEBSITES_PORT=80 BACKEND_URL="http://localhost:8080"
 ```
+
+> **Nota:** Azure App Service Multi-container hace que todos los contenedores compartan el mismo espacio de red, por lo que el Frontend debe llamar al Backend mediante `http://localhost:8080` en lugar de `http://backend:8080` (nombre de servicio de Compose). Esto queda reflejado en la variable `BACKEND_URL`.
 
 **C. Configuración del Almacenamiento Persistente en Azure**
 Dado que el volumen `AlmacenamientoPersistente` ahora se monta sobre el Frontend (para guardar `history.txt`), Azure se encargará de mapear automáticamente el File Share al contenedor Frontend gracias al ID coincidente. Para asociarlo (eliminando previamente cualquier montaje con el mismo ID si existe):
@@ -718,7 +826,10 @@ Dado que el volumen `AlmacenamientoPersistente` ahora se monta sobre el Frontend
 # 1. Eliminar un montaje previo con el mismo ID si existe
 az webapp config storage-account delete --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --custom-id AlmacenamientoPersistente
 
-# 2. Asociar la cuenta de almacenamiento a la Web App
+# 2. (Opcional) Limpiar el historial previo en la nube para empezar con una demo limpia (si no existe el archivo, dará error, el cual se puede ignorar)
+az storage file delete --share-name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY --path history.txt
+
+# 3. Asociar la cuenta de almacenamiento a la Web App
 az webapp config storage-account add --resource-group $RESOURCE_GROUP --name $WEB_APP_NAME --custom-id AlmacenamientoPersistente --storage-type AzureFiles --account-name $STORAGE_ACCOUNT --share-name $SHARE_NAME --access-key $STORAGE_KEY --mount-path /app/data
 ```
 
@@ -739,27 +850,62 @@ Para comprobar la persistencia de los logs ante reinicios y recreaciones de los 
 
 2. Envía una petición de generación de contenido (espera un par de minutos a que los contenedores hayan arrancado):
    ```powershell
-   Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/generate?prompt=Azure_Prompt_v3"
+   Invoke-WebRequest "https://webapp-fastapi-gemini.azurewebsites.net/generate?prompt=Azure_Prompt_v3" -UseBasicParsing
    ```
    *(Nota: Durante el periodo de arranque, es completamente normal y esperable que la petición falle inicialmente con un error de conexión `{"detail": "ConnectError('All connection attempts failed')"}` mientras el contenedor backend termina de iniciar. Espera uno o dos minutos y vuelve a realizar la llamada).*
 
 3. Comprueba los logs en el nuevo endpoint para verificar el flujo de comunicación inicial:
    ```powershell
-   (Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/logs").Content
+   (Invoke-WebRequest "https://webapp-fastapi-gemini.azurewebsites.net/logs" -UseBasicParsing).Content
    ```
 
-4. Fuerza un reinicio de la Web App en Azure para simular la destrucción y recreación de los contenedores:
+4. (Opcional) Verifica que el archivo de logs se ha creado físicamente en el almacenamiento de Azure Files mediante CLI:
+   ```powershell
+   # Listar archivos en el File Share
+   az storage file list --share-name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY --output table
+
+   # Descargar y ver el contenido de history.txt
+   az storage file download --share-name $SHARE_NAME --account-name $STORAGE_ACCOUNT --account-key $STORAGE_KEY --path history.txt --dest .
+   Get-Content history.txt
+   Remove-Item history.txt
+   ```
+
+5. Fuerza un reinicio de la Web App en Azure para simular la destrucción y recreación de los contenedores:
    ```powershell
    az webapp restart --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
    ```
 
-5. Realiza de nuevo la consulta al endpoint de logs (espera el arranque):
+6. Realiza de nuevo la consulta al endpoint de logs (espera el arranque):
    ```powershell
-   (Invoke-WebRequest "https://$WEB_APP_NAME.azurewebsites.net/logs").Content
+   (Invoke-WebRequest "https://webapp-fastapi-gemini.azurewebsites.net/logs" -UseBasicParsing).Content
    ```
    **Resultado esperado:** El endpoint debe seguir devolviendo los registros de logs previos (`"INFO - Enviando prompt..."` e `"INFO - Respuesta exitosa..."`), demostrando que el historial persistió gracias al montaje de Azure Files.
 
    ![Prueba de persistencia de logs en Azure](images/31_prueba_persistencia_logs_azure.png)
+
+---
+
+### 4.5. Control de Gastos y Limpieza de Recursos (Azure Cost Management)
+
+Para evitar que los recursos aprovisionados sigan consumiendo saldo de tus créditos de estudiante o facturando importes adicionales tras haber finalizado la práctica, se aconseja gestionar la parada o eliminación del entorno con uno de los siguientes métodos:
+
+#### Opción A: Detener la ejecución de la Web App (Conserva la configuración)
+Si quieres pausar temporalmente el servicio (por ejemplo, para seguir haciendo pruebas en otro momento o para grabar el vídeo explicativo) deteniendo la ejecución de los contenedores:
+```powershell
+# Detener la Web App
+az webapp stop --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
+
+# Reanudar la Web App
+az webapp start --name $WEB_APP_NAME --resource-group $RESOURCE_GROUP
+```
+> ⚠️ **Nota:** Ten en cuenta que si el Plan de App Service está en un tier de pago (como el SKU B1 recomendado para multi-contenedor), el coste del plan de hospedaje se seguirá cobrando por hora aunque la Web App esté detenida.
+
+#### Opción B: Eliminar el Grupo de Recursos por completo (Recomendado al finalizar)
+Si has completado toda la práctica y grabado el vídeo explicativo, la forma idónea de detener el gasto al 100% de manera definitiva es destruir el grupo de recursos completo. Esto eliminará de forma permanente la Web App, el App Service Plan, el Azure Container Registry (ACR) y la Storage Account:
+```powershell
+# Eliminar el grupo de recursos completo sin esperar confirmación interactiva
+az group delete --name $RESOURCE_GROUP --yes --no-wait
+```
 
 ---
 
