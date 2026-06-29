@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    image: planservicioia.azurecr.io/fastapi-backend:v3
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    expose:
+      - "8080"
+
+  frontend:
+    build: ./frontend
+    image: planservicioia.azurecr.io/fastapi-frontend:v3
+    environment:
+      - BACKEND_URL=http://backend:8080
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    volumes:
+      - AlmacenamientoPersistente:/app/data
+
+volumes:
+  AlmacenamientoPersistente:
+
